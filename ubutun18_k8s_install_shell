@@ -1,0 +1,155 @@
+#!/bin/bash
+
+# Install the ubuntu k8s shell
+echo "Install the ubuntu k8s shell"
+
+### change the apt source list
+
+echo "change the apt source list"
+
+mv /etc/apt/sources.list /etc/apt/sources.list.backup
+
+cat <<EOF > /etc/apt/sources.list
+deb https://mirrors.ustc.edu.cn/ubuntu/ bionic main restricted universe multiverse
+deb-src https://mirrors.ustc.edu.cn/ubuntu/ bionic main restricted universe multiverse
+deb https://mirrors.ustc.edu.cn/ubuntu/ bionic-updates main restricted universe multiverse
+deb-src https://mirrors.ustc.edu.cn/ubuntu/ bionic-updates main restricted universe multiverse
+deb https://mirrors.ustc.edu.cn/ubuntu/ bionic-backports main restricted universe multiverse
+deb-src https://mirrors.ustc.edu.cn/ubuntu/ bionic-backports main restricted universe multiverse
+deb https://mirrors.ustc.edu.cn/ubuntu/ bionic-security main restricted universe multiverse
+deb-src https://mirrors.ustc.edu.cn/ubuntu/ bionic-security main restricted universe multiverse
+deb https://mirrors.ustc.edu.cn/ubuntu/ bionic-proposed main restricted universe multiverse
+deb-src https://mirrors.ustc.edu.cn/ubuntu/ bionic-proposed main restricted universe multiverse
+EOF
+
+apt update
+
+echo "============================================="
+
+## install ssh server
+apt install -y openssh-server
+
+### Allow user+password login
+sed -i 's/#PermitRootLogin yes/PermitRootLogin yes/g' /etc/ssh/sshd_config
+sed -i 's/#PasswordAuthentication yes/PasswordAuthentication yes/g' /etc/ssh/sshd_config
+systemctl enable ssh
+systemctl start sshd
+
+echo "Now you can login in the machine with ssh"
+
+echo "============================================="
+
+## install docker
+apt-get install apt-transport-https ca-certificates curl software-properties-common
+curl -fsSL https://mirrors.ustc.edu.cn/docker-ce/linux/ubuntu/gpg | apt-key add -
+
+add-apt-repository "deb [arch=amd64] https://mirrors.ustc.edu.cn/docker-ce/linux/ubuntu \
+    $(lsb_release -cs) \
+    stable"
+
+apt-get install -y docker-ce
+
+systemctl enable docker
+systemctl start docker
+
+echo "Docker container has been installed and started"
+
+echo "============================================="
+
+echo "Start to install shadowsock and privoxy"
+
+apt-get install python-pip
+pip install git+https://github.com/shadowsocks/shadowsocks.git@master
+
+cat <<EOF > /etc/shadowsocks.json
+{
+    "server" : "sg01.0bad.com",
+    "server_port" : 34245,
+    "password" : "f69698",
+    "method" : "aes-128-cfb",
+    "local_address": "127.0.0.1",
+    "local_port":1080,
+    "timeout":300,
+    "fast_open": false
+}
+EOF
+
+/usr/local/bin/sslocal -c /etc/shadowsocks.json -d start
+
+apt-get install -y privoxy
+
+echo "forward-socks5t   /               127.0.0.1:1080 ." >> /etc/privoxy/config
+
+systemctl start privoxy
+
+cat <<EOF >> ~/.profile
+export http_proxy=http://127.0.0.1:8118
+export https_proxy=http://127.0.0.1:8118
+export ftp_proxy=http://127.0.0.1:8118
+export no_proxy=localhost,127.0.0.0,127.0.1.1,127.0.1.1,10.0.0.0/8,172.0.0.0/8,192.168.0.0/16,mirrors.aliyun.com
+
+export HTTP_PROXY=http://127.0.0.1:8118
+export HTTPS_PROXY=http://127.0.0.1:8118
+export FTP_PROXY=http://127.0.0.1:8118
+export NO_PROXY=localhost,127.0.0.0,127.0.1.1,127.0.1.1,10.0.0.0/8,172.0.0.0/8,192.168.0.0/16,mirrors.aliyun.com
+EOF
+
+source ~/.profile
+
+echo "shadowsock and privoxy has been installed and started"
+
+echo "============================================="
+
+## install kubeadm
+
+curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | apt-key add -
+
+cat <<EOF > /etc/apt/sources.list.d/kubernetes.list
+deb http://apt.kubernetes.io/ kubernetes-bionic main
+EOF
+
+### cat <<EOF > /etc/apt/sources.list.d/kubernetes.list
+### deb http://mirrors.ustc.edu.cn/kubernetes/apt kubernetes-bionic main
+### EOF
+
+apt-get update
+
+apt-get install -y docker.io kubeadm
+
+echo "kubeadm has been installed and started"
+
+echo "turn off swap"
+
+sed -i 's/\/swap.img/#\/swap.img/g' /etc/fstab
+swapoff -a
+
+##### Please change the aliyun registry by yourself
+
+mkdir -p /etc/docker
+tee /etc/docker/daemon.json <<-'EOF'
+{
+  "registry-mirrors": ["https://dkdielg6.mirror.aliyuncs.com"]
+}
+EOF
+
+mkdir -p /etc/systemd/system/docker.service.d
+cat <<EOF > /etc/systemd/system/docker.service.d/http-proxy.conf 
+[Service]
+Environment="HTTP_PROXY=http://127.0.0.1:8118/"
+Environment="NO_PROXY=localhost,127.0.0.0/8,10.0.0.0/8,172.0.0.0/8,192.168.0.0/16,dkdielg6.mirror.aliyuncs.com"
+EOF
+systemctl daemon-reload
+systemctl restart docker
+
+kubeadm init --apiserver-advertise-address 192.168.8.129 --pod-network-cidr=192.168.8.0/24
+
+
+mkdir -p $HOME/.kube
+sudo cp -i /etc/kubernetes/admin.conf $HOME/.kube/config
+sudo chown $(id -u):$(id -g) $HOME/.kube/config
+
+#### kubectl apply -f https://raw.githubusercontent.com/coreos/flannel/master/Documentation/kube-flannel.yml
+kubectl apply -f https://git.io/weave-kube-1.6
+
+### https://github.com/kubernetes/kubeadm/issues/1292
+#### hacky solution...
